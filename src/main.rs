@@ -1,4 +1,5 @@
 mod libwebp;
+mod args;
 
 use crate::libwebp::{webp_convert, webp_install_check, ConversionMethod};
 use clap::Parser;
@@ -17,35 +18,12 @@ use serde_json::Value::Array;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Args {
-    /// Instance URL (e.g. https://grist.mydomain.net/api)
-    #[arg(short='u', long)]
-    base_url: String,
-
-    /// Temporary directory (e.g. /tmp/)
-    #[arg(short='d', long)]
-    dir: String,
-
-    /// Grist API-token
-    #[clap(short='t', long)]
-    token: String,
-
-    /// Attachment conversion method
-    #[clap(short='c', long, default_value_t = ConversionMethod::Normal)]
-    conversion_method: ConversionMethod,
-
-    /// A specific document or nothing to scan all documents
-    #[clap(short='s', long)]
-    specific_document: Option<String>,
-}
+use crate::args::Args;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    
+
     if !webp_install_check().await {
         return Err("The cwebp utility is missing".into());
     }
@@ -53,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !dir_metadata.is_dir() {
         return Err("The specified directory is not a directory".into());
     }
-    
+
     let configuration = Configuration::new(args.base_url, Some(args.token));
     optimize_attachments(&configuration, args.conversion_method, &args.dir, &args.specific_document).await;
 
@@ -119,7 +97,7 @@ fn filter_attachments(attachments: Vec<AttachmentMetadataListRecordsInner>) -> V
             let upper_file_type = file_type.to_uppercase();
             if is_unoptimized_image_type(&upper_file_type) {
                 if optimized_images.contains(file_name) {
-                    println!("Skipping unoptimized image {}, it seems to have already been converted...", file_name);   
+                    println!("Skipping unoptimized image {}, it seems to have already been converted...", file_name);
                 }
                 else {
                     to_process.push(attachment);
