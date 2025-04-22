@@ -1,6 +1,6 @@
 mod libwebp;
 
-use crate::libwebp::{webp_convert, webp_install_check, CompressionMethod};
+use crate::libwebp::{webp_convert, webp_install_check, ConversionMethod};
 use clap::Parser;
 use grist_client::apis::attachments_api::{download_attachment, list_attachments, upload_attachments};
 use grist_client::apis::columns_api::list_columns;
@@ -32,13 +32,20 @@ struct Args {
     /// Grist API-token
     #[clap(short='t', long)]
     token: String,
+
+    /// Attachment conversion method
+    #[clap(short='c', long, default_value_t = ConversionMethod::Normal)]
+    conversion_method: ConversionMethod,
+
+    /// A specific document or nothing to scan all documents
+    #[clap(short='s', long)]
+    specific_document: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let compression_method = CompressionMethod::SLOWER;
-
+    
     if !webp_install_check().await {
         return Err("The cwebp utility is missing".into());
     }
@@ -46,41 +53,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !dir_metadata.is_dir() {
         return Err("The specified directory is not a directory".into());
     }
-
+    
     let configuration = Configuration::new(args.base_url, Some(args.token));
-    optimize_attachments(&configuration, compression_method, &args.dir).await;
+    optimize_attachments(&configuration, args.conversion_method, &args.dir, &args.specific_document).await;
 
     Ok(())
 }
 
 const WEBP_QUALITY: usize = 25;
 
-async fn optimize_attachments(configuration: &Configuration, compression_method: CompressionMethod, image_folder: &str) {
-    if let Ok(orgs) = list_orgs(&configuration).await {
+async fn optimize_attachments(configuration: &Configuration, conversion_method: ConversionMethod, image_folder: &str, specific_doc: &Option<String>) {
+    if let Ok(orgs) = list_orgs(configuration).await {
         for org in orgs {
             if let Some(org_domain) = org.domain {
-                if let Ok(workspaces) = list_workspaces(&configuration, &org_domain).await {
+                if let Ok(workspaces) = list_workspaces(configuration, &org_domain).await {
                     for workspace in workspaces {
-                        if let Ok(workspace_info) = describe_workspace(&configuration, workspace.id as i32).await {
+                        if let Ok(workspace_info) = describe_workspace(configuration, workspace.id as i32).await {
                             for doc in workspace_info.docs {
-                                if doc.name != "Test" {
-                                    println!("Skipping non test docs ({})", doc.name);
-                                    continue;
+                                if let Some(specific_doc) = specific_doc {
+                                    if doc.name != *specific_doc {
+                                        println!("Skipped doc '{}'...", doc.name);
+                                        continue;
+                                    }
                                 }
                                 println!("Optimizing {} document", doc.name);
                                 
                                 // Old attachment ID -> New attachment ID
                                 let mut attachments_map: HashMap<u64, u64> = Default::default();
-                                if let Ok(attachments) = list_attachments(&configuration, &doc.id, None, None, None, None, None).await {
+                                if let Ok(attachments) = list_attachments(configuration, &doc.id, None, None, None, None, None).await {
                                     let all_attachments_length = attachments.records.len();
                                     let filtered_attachments = filter_attachments(attachments.records);
                                     println!("Optimizing {}/{} attachments in {}", filtered_attachments.len(), all_attachments_length, doc.name);
                                     for attachment in filtered_attachments {
-                                        let updated_attachment_id = process_attachment(&configuration, compression_method, &image_folder, &doc.id, &attachment).await.expect("Failed to process attachment");
+                                        let updated_attachment_id = process_attachment(configuration, conversion_method, image_folder, &doc.id, &attachment).await.expect("Failed to process attachment");
                                         attachments_map.insert(attachment.id, updated_attachment_id);
                                     }
                                 }
-                                swap_attachments(&configuration, &doc.id, &attachments_map).await;
+                                swap_attachments(configuration, &doc.id, &attachments_map).await;
                             }
                         }
                     }
@@ -118,21 +127,20 @@ fn filter_attachments(attachments: Vec<AttachmentMetadataListRecordsInner>) -> V
             }
         }
     }
-    return to_process;
+    to_process
 }
 
 /// Swap the attachment references in cells with the new optimized images
 async fn swap_attachments(configuration: &Configuration, doc_id: &str, attachments_map: &HashMap<u64, u64>) {
-    let tables = list_tables(&configuration, doc_id).await.expect("Failed to list tables");
+    let tables = list_tables(configuration, doc_id).await.expect("Failed to list tables");
     for table in tables.tables {
-        let attachment_column_ids = scan_for_attachment_columns(&configuration, doc_id, &table.id).await;
-        let record_list = list_records(&configuration, doc_id, &table.id, None, None, None, None, None, None).await.expect("Failed to list records");
+        let attachment_column_ids = scan_for_attachment_columns(configuration, doc_id, &table.id).await;
+        let record_list = list_records(configuration, doc_id, &table.id, None, None, None, None, None, None).await.expect("Failed to list records");
 
         'record_loop: for record in record_list.records {
             let mut modified_record = record.clone();
             
             for attachment_column in &attachment_column_ids {
-                let record_id = record.id;
                 let old_attachment_ids: Vec<u64> = get_attachment_ids(record.fields.get(attachment_column.as_str())).expect("Failed to get attachment ids");
                 let mut new_attachment_ids: Vec<u64> = Vec::new();
                 for old_attachment_id in old_attachment_ids {
@@ -149,9 +157,8 @@ async fn swap_attachments(configuration: &Configuration, doc_id: &str, attachmen
             }
 
             // Execute changes one at a time in case something goes wrong
-            let mut records_to_modify: Vec<models::RecordsListRecordsInner> = Default::default();
-            records_to_modify.push(modified_record);
-            modify_records(&configuration, doc_id, &table.id, RecordsList::new(records_to_modify), None).await.expect("Failed to modify records");
+            let records_to_modify: Vec<models::RecordsListRecordsInner> = vec![modified_record];
+            modify_records(configuration, doc_id, &table.id, RecordsList::new(records_to_modify), None).await.expect("Failed to modify records");
         }
     }
 }
@@ -164,14 +171,14 @@ fn create_new_cell_value(ids: &Vec<u64>) -> Result<Value, &'static str> {
         values.push(Value::from(serde_json::Number::from(*id)));
     }
     let array = Array(values);
-    return Ok(array);
+    Ok(array)
 }
 
 #[deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 fn get_attachment_ids(column: Option<&Value>) -> Result<Vec<u64>, &'static str> {
     let attachment_cell = column.ok_or("No attachment cell")?;
     let array = if let Array(arr) = attachment_cell { arr } else { Err("Attachment cell is not an array")? };
-    let prefix_value = array.get(0).ok_or("No elements in array")?.as_str().ok_or("Attachment cell is not a string")?;
+    let prefix_value = array.first().ok_or("No elements in array")?.as_str().ok_or("Attachment cell is not a string")?;
     if prefix_value != "L" { return Err("Prefix value (L) is missing") }
     let capacity = array.len().saturating_sub(1); // First value is skipped
     let mut ids = Vec::with_capacity(capacity); 
@@ -184,10 +191,10 @@ fn get_attachment_ids(column: Option<&Value>) -> Result<Vec<u64>, &'static str> 
 
 async fn scan_for_attachment_columns(configuration: &Configuration, doc_id: &str, table_id: &str) -> Vec<String> {
     let mut attachment_column_ids: Vec<String> = Vec::new();
-    let columns_list = list_columns(&configuration, doc_id, table_id, Some(true)).await.expect("Failed to list columns");
+    let columns_list = list_columns(configuration, doc_id, table_id, Some(true)).await.expect("Failed to list columns");
     if let Some(columns) = columns_list.columns {
         for column in columns {
-            let col_type = column.fields.expect("Failed to get column fields").col_type.expect("Failed to get column type").clone();
+            let col_type = column.fields.expect("Failed to get column fields").col_type.expect("Failed to get column type");
             // Attachments in Any columns are ignored because of efficiency
             if col_type == Type::Attachments {
                 let col_id = column.id.expect("Failed to get column id").to_string();
@@ -199,7 +206,7 @@ async fn scan_for_attachment_columns(configuration: &Configuration, doc_id: &str
 }
 
 #[deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-async fn process_attachment(configuration: &Configuration, compression_method: CompressionMethod, image_folder: &str, doc_id: &str, attachment: &AttachmentMetadataListRecordsInner) -> Result<u64, &'static str> {
+async fn process_attachment(configuration: &Configuration, compression_method: ConversionMethod, image_folder: &str, doc_id: &str, attachment: &AttachmentMetadataListRecordsInner) -> Result<u64, &'static str> {
     if let Some(complete_filename) = attachment.fields.file_name.clone() {
         let (file_name, file_type) = complete_filename.rsplit_once(".").ok_or("Failed to parse filename")?;
 
@@ -211,9 +218,9 @@ async fn process_attachment(configuration: &Configuration, compression_method: C
         let upper_file_type = file_type.to_ascii_uppercase();
         let is_unoptimized_image_type = upper_file_type == "JPG" || upper_file_type == "JPEG" || upper_file_type == "PNG";
         if is_unoptimized_image_type {
-            let old_size_kb = attachment.fields.file_size.ok_or("Failed to get original file size")? as usize / 1024;
+            let old_size_kb = attachment.fields.file_size.ok_or("Failed to get original file size")? / 1024;
             if !downloaded_file_exists && !converted_file_exists {
-                let attachment_bytes = download_attachment(&configuration, doc_id, attachment.id).await.map_err(|_| "Failed to download attachment")?;
+                let attachment_bytes = download_attachment(configuration, doc_id, attachment.id).await.map_err(|_| "Failed to download attachment")?;
                 fs::write(&downloaded_file_path, attachment_bytes).map_err(|_| "Failed to save attachment")?;
 
                 if !converted_file_exists {
@@ -225,8 +232,8 @@ async fn process_attachment(configuration: &Configuration, compression_method: C
 
                     let attachment_paths = vec![PathBuf::from(converted_file_path)];
 
-                    let ids = upload_attachments(&configuration, doc_id, attachment_paths).await.map_err(|_| "Failed to upload attachments")?;
-                    let new_attachment_id = *(ids.get(0).ok_or("Failed to get attachment id")?);
+                    let ids = upload_attachments(configuration, doc_id, attachment_paths).await.map_err(|_| "Failed to upload attachments")?;
+                    let new_attachment_id = *(ids.first().ok_or("Failed to get attachment id")?);
 
                     println!("Optimized '{file_name}' of type {upper_file_type} with size {old_size_kb}KiB and shrunk it to {converted_file_size_kb}KiB.");
                     
@@ -245,10 +252,12 @@ async fn process_attachment(configuration: &Configuration, compression_method: C
 }
 
 /// file type must be uppercase
+#[deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 fn is_unoptimized_image_type(file_type: &str) -> bool {
     file_type == "JPG" || file_type == "JPEG" || file_type == "PNG"
 }
 /// file type must be uppercase
+#[deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 fn is_optimized_image_type(file_type: &str) -> bool {
     file_type == "WEBP"
 }
