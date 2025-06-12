@@ -1,29 +1,26 @@
 mod libwebp;
 mod args;
 
+use crate::args::Args;
 use crate::libwebp::{webp_convert, webp_install_check, ConversionMethod};
 use clap::Parser;
+use futures::future::join_all;
 use grist_client::apis::attachments_api::{download_attachment, list_attachments, upload_attachments};
 use grist_client::apis::columns_api::list_columns;
 use grist_client::apis::configuration::Configuration;
 use grist_client::apis::orgs_api::list_orgs;
-use grist_client::apis::records_api::{list_records, modify_records, ModifyRecordsError};
+use grist_client::apis::records_api::{list_records, modify_records};
 use grist_client::apis::tables_api::list_tables;
 use grist_client::apis::workspaces_api::{describe_workspace, list_workspaces};
 use grist_client::models;
 use grist_client::models::get_fields::Type;
-use grist_client::models::{AttachmentMetadataListRecordsInner, RecordsList, RecordsListRecordsInner};
+use grist_client::models::{AttachmentMetadataListRecordsInner, Doc, RecordsList, RecordsListRecordsInner};
 use serde_json::Value;
 use serde_json::Value::Array;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::rc::Rc;
-use std::sync::Arc;
 use tokio;
-use crate::args::Args;
-use futures::future::join_all;
-use grist_client::apis::Error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,47 +43,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 const WEBP_QUALITY: usize = 25;
 
 async fn optimize_attachments(configuration: &Configuration, conversion_method: ConversionMethod, image_folder: &str, specific_doc: &Option<String>) {
-    let image_folder_rc = Arc::new(image_folder.to_string());
     if let Ok(orgs) = list_orgs(configuration).await {
         for org in orgs {
             if let Some(org_domain) = org.domain {
                 if let Ok(workspaces) = list_workspaces(configuration, &org_domain).await {
                     for workspace in workspaces {
                         if let Ok(workspace_info) = describe_workspace(configuration, workspace.id as i32).await {
-                            for doc in workspace_info.docs {
+                            'doc_loop: for doc in workspace_info.docs {
                                 if let Some(specific_doc) = specific_doc {
                                     if doc.name != *specific_doc {
                                         println!("Skipped doc '{}'...", doc.name);
-                                        continue;
+                                        continue 'doc_loop;
                                     }
                                 }
-                                println!("Optimizing {} document", doc.name);
-                                
-                                // Old attachment ID -> New attachment ID
-                                let mut attachments_map: HashMap<u64, u64> = Default::default();
-                                if let Ok(attachments) = list_attachments(configuration, &doc.id, None, None, None, None, None).await {
-                                    let all_attachments_length = attachments.records.len();
-                                    let filtered_attachments = filter_attachments(attachments.records);
-                                    println!("Optimizing {}/{} attachments in {}", filtered_attachments.len(), all_attachments_length, doc.name);
-                                    let mut tasks = Vec::new();
-                                    for attachment in filtered_attachments {
-                                        let task = process_attachment(configuration, conversion_method, image_folder_rc.clone(), &doc.id, attachment);
-                                        tasks.push(task);
-                                    }
-                                    for task in join_all(tasks).await {
-                                        match task {
-                                            Ok(updated_ids) => {
-                                                if updated_ids.new != updated_ids.old {
-                                                    attachments_map.insert(updated_ids.old, updated_ids.new);
-                                                }
-                                            }
-                                            Err(e) => {
-                                                eprintln!("Failed to process attachment {e}");
-                                            }
-                                        }
-                                    }
-                                }
-                                swap_attachments(configuration, &doc.id, &attachments_map).await;
+                                optimize_attachments_doc(configuration, doc, conversion_method, image_folder).await;
                             }
                         }
                     }
@@ -94,6 +64,36 @@ async fn optimize_attachments(configuration: &Configuration, conversion_method: 
             }
         }
     }
+}
+
+async fn optimize_attachments_doc(configuration: &Configuration, doc: Doc, conversion_method: ConversionMethod, image_folder: &str) {
+    println!("Optimizing {} document", doc.name);
+
+    // Old attachment ID -> New attachment ID
+    let mut attachments_map: HashMap<u64, u64> = Default::default();
+    if let Ok(attachments) = list_attachments(configuration, &doc.id, None, None, None, None, None).await {
+        let all_attachments_length = attachments.records.len();
+        let filtered_attachments = filter_attachments(attachments.records);
+        println!("Optimizing {}/{} attachments in {}", filtered_attachments.len(), all_attachments_length, doc.name);
+        let mut tasks = Vec::new();
+        for attachment in filtered_attachments {
+            let task = process_attachment(configuration, conversion_method, image_folder, &doc.id, attachment);
+            tasks.push(task);
+        }
+        for task in join_all(tasks).await {
+            match task {
+                Ok(updated_ids) => {
+                    if updated_ids.new != updated_ids.old {
+                        attachments_map.insert(updated_ids.old, updated_ids.new);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to process attachment {e}");
+                }
+            }
+        }
+    }
+    swap_attachments(configuration, &doc.id, &attachments_map).await;
 }
 
 fn filter_attachments(attachments: Vec<AttachmentMetadataListRecordsInner>) -> Vec<AttachmentMetadataListRecordsInner> {
@@ -237,7 +237,7 @@ struct UpdatedAttachmentIds {
 }
 
 #[deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-async fn process_attachment(configuration: &Configuration, compression_method: ConversionMethod, image_folder: Arc<String>, doc_id: &str, attachment: AttachmentMetadataListRecordsInner) -> Result<UpdatedAttachmentIds, &'static str> {
+async fn process_attachment(configuration: &Configuration, compression_method: ConversionMethod, image_folder: &str, doc_id: &str, attachment: AttachmentMetadataListRecordsInner) -> Result<UpdatedAttachmentIds, &'static str> {
     if let Some(complete_filename) = attachment.fields.file_name.clone() {
         let (file_name, file_type) = complete_filename.rsplit_once(".").ok_or("Failed to parse filename")?;
 
