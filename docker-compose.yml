@@ -1,0 +1,10 @@
+services:
+  grist-image-optimizer:
+      image: qazcetelic/grist-image-optimizer
+      environment:
+        # e.g. https://example.net/api
+        # GIO_BASE_URL:
+        # GIO_API_TOKEN:
+        GIO_CONVERSION_METHOD: "normal"
+        GIO_CONCURRENT_DOWNLOADS: 5
+        GIO_INTERVAL: 300
