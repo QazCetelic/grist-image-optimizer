@@ -3,7 +3,7 @@ mod args;
 
 use crate::args::Args;
 use crate::libwebp::{webp_convert, webp_install_check, ConversionMethod};
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use clap::Parser;
 use futures::future::join_all;
 use grist_client::apis::attachments_api::{download_attachment, list_attachments, upload_attachments};
@@ -20,7 +20,8 @@ use serde_json::Value::Array;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use tempfile::NamedTempFile;
 use tokio::sync::Semaphore;
 
 #[tokio::main]
@@ -30,18 +31,14 @@ async fn main() -> anyhow::Result<()> {
     if !webp_install_check().await {
         bail!("The cwebp utility is missing");
     }
-    let dir_metadata = fs::metadata(&args.dir)?;
-    if !dir_metadata.is_dir() {
-        bail!("The specified directory is not a directory");
-    }
 
     let configuration = Configuration::new(args.base_url, Some(args.token));
-    optimize_attachments(&configuration, args.conversion_method, &args.dir, args.concurrent_downloads, &args.specific_document).await?;
+    optimize_attachments(&configuration, args.conversion_method, args.concurrent_downloads, &args.specific_document).await?;
 
     Ok(())
 }
 
-async fn optimize_attachments(configuration: &Configuration, conversion_method: ConversionMethod, image_folder: &str, concurrent_downloads: usize, specific_doc: &Option<String>) -> anyhow::Result<()> {
+async fn optimize_attachments(configuration: &Configuration, conversion_method: ConversionMethod, concurrent_downloads: usize, specific_doc: &Option<String>) -> anyhow::Result<()> {
     if let Ok(orgs) = list_orgs(configuration).await {
         for org in orgs {
             if let Some(org_domain) = org.domain {
@@ -55,7 +52,7 @@ async fn optimize_attachments(configuration: &Configuration, conversion_method: 
                                         continue 'doc_loop;
                                     }
                                 }
-                                optimize_attachments_doc(configuration, doc, conversion_method, image_folder, concurrent_downloads).await?;
+                                optimize_attachments_doc(configuration, doc, conversion_method, concurrent_downloads).await?;
                             }
                         }
                     }
@@ -66,7 +63,7 @@ async fn optimize_attachments(configuration: &Configuration, conversion_method: 
     Ok(())
 }
 
-async fn optimize_attachments_doc(configuration: &Configuration, doc: Doc, conversion_method: ConversionMethod, image_folder: &str, concurrent_downloads: usize) -> anyhow::Result<()> {
+async fn optimize_attachments_doc(configuration: &Configuration, doc: Doc, conversion_method: ConversionMethod, concurrent_downloads: usize) -> anyhow::Result<()> {
     println!("Optimizing {} document", doc.name);
 
     // Too many concurrent downloads result in API errors
@@ -83,7 +80,7 @@ async fn optimize_attachments_doc(configuration: &Configuration, doc: Doc, conve
         }
         let mut tasks = Vec::new();
         for attachment in filtered_attachments {
-            let task = process_attachment(configuration, conversion_method, image_folder, &doc.id, attachment, &download_semaphore);
+            let task = process_attachment(configuration, conversion_method, &doc.id, attachment, &download_semaphore);
             tasks.push(task);
         }
         for task in join_all(tasks).await {
@@ -244,14 +241,9 @@ struct UpdatedAttachmentIds {
     pub new: u64
 }
 
-async fn process_attachment(configuration: &Configuration, compression_method: ConversionMethod, image_folder: &str, doc_id: &str, attachment: AttachmentMetadataListRecordsInner, download_semaphore: &Semaphore) -> anyhow::Result<UpdatedAttachmentIds> {
+async fn process_attachment(configuration: &Configuration, compression_method: ConversionMethod, doc_id: &str, attachment: AttachmentMetadataListRecordsInner, download_semaphore: &Semaphore) -> anyhow::Result<UpdatedAttachmentIds> {
     if let Some(complete_filename) = attachment.fields.file_name.clone() {
         let (file_name, file_type) = complete_filename.rsplit_once(".").context("Failed to parse filename")?;
-
-        let downloaded_file_path = format!("{image_folder}/{file_name}.jpg");
-        let downloaded_file_exists = fs::metadata(&downloaded_file_path).is_ok();
-        let converted_file_path = format!("{image_folder}/{file_name}.webp");
-        let converted_file_exists = fs::metadata(&converted_file_path).is_ok();
 
         let upper_file_type = file_type.to_ascii_uppercase();
         let is_unoptimized_image_type = upper_file_type == "JPG" || upper_file_type == "JPEG" || upper_file_type == "PNG";
@@ -261,35 +253,32 @@ async fn process_attachment(configuration: &Configuration, compression_method: C
             const QUALITY_MAX: isize = 70;
             const QUALITY_MIN: isize = 3;
             const QUALITY_KB_RATIO: usize = 10;
-            let should_convert = !converted_file_exists && old_size_kb >= MIN_SIZE_KB;
+            let should_convert = old_size_kb >= MIN_SIZE_KB;
             if should_convert {
                 let download_permit = download_semaphore.acquire().await.context("Failed to acquire download semaphore")?;
                 let attachment_bytes = download_attachment(configuration, doc_id, attachment.id).await;
                 drop(download_permit);
                 let attachment_bytes = attachment_bytes.context("Failed to download attachment")?;
-                fs::write(&downloaded_file_path, attachment_bytes).context("Failed to save attachment")?;
+                let mut original_file = NamedTempFile::new()?;
+                original_file.write(&attachment_bytes).context("Failed to write to temporary file")?;
 
-                if !converted_file_exists {
-                    let webp_quality = max(QUALITY_MAX - (old_size_kb / QUALITY_KB_RATIO) as isize, QUALITY_MIN) as usize;
-                    if let Err(err) = webp_convert(compression_method, webp_quality, &downloaded_file_path, &converted_file_path).await {
-                        bail!(err);
-                    }
-                    fs::remove_file(&downloaded_file_path).context("Failed to remove original file")?;
+                let mut converted_file = NamedTempFile::new()?;
+                let webp_quality = max(QUALITY_MAX - (old_size_kb / QUALITY_KB_RATIO) as isize, QUALITY_MIN) as usize;
+                webp_convert(compression_method, webp_quality, &original_file, &mut converted_file).await.map_err(|err| anyhow!(err))?;
+                drop(original_file);
 
-                    let converted_file_metadata = fs::metadata(&converted_file_path).context("Failed to get metadata of converted file")?;
-                    let converted_file_size_kb = converted_file_metadata.len() / 1024;
+                let converted_file_metadata = fs::metadata(&converted_file.path()).context("Failed to get metadata of converted file")?;
+                let converted_file_size_kb = converted_file_metadata.len() / 1024;
 
-                    let attachment_paths = vec![PathBuf::from(converted_file_path)];
+                let attachment_paths = vec![converted_file.path().to_path_buf()];
 
-                    let ids = upload_attachments(configuration, doc_id, attachment_paths).await.context("Failed to upload attachments")?;
-                    let new_attachment_id = *(ids.first().context("Failed to get attachment id")?);
+                let ids = upload_attachments(configuration, doc_id, attachment_paths).await.context("Failed to upload attachments")?;
+                drop(converted_file);
+                let new_attachment_id = *(ids.first().context("Failed to get attachment id")?);
 
-                    println!("Optimized '{file_name}' of type {upper_file_type} with size {old_size_kb}KiB and shrunk it to {converted_file_size_kb}KiB with quality {webp_quality}%.");
-                    
-                    // There currently is no endpoint to remove the old attachments
-                    
-                    return Ok(UpdatedAttachmentIds { old: attachment.id, new: new_attachment_id }); // Use new attachment
-                }
+                println!("Optimized '{file_name}' of type {upper_file_type} with size {old_size_kb}KiB and shrunk it to {converted_file_size_kb}KiB with quality {webp_quality}%.");
+
+                return Ok(UpdatedAttachmentIds { old: attachment.id, new: new_attachment_id }); // Use new attachment
             }
         }
 

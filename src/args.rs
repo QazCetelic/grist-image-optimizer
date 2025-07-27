@@ -8,10 +8,6 @@ pub struct Args {
     #[arg(short='u', long, env = "GIO_BASE_URL")]
     pub base_url: String,
 
-    /// Temporary directory (e.g. /tmp/)
-    #[arg(short='d', long, env = "GIO_TEMPORARY_DIRECTORY")]
-    pub dir: String,
-
     /// Grist API-token
     #[clap(short='t', long, env = "GIO_API_TOKEN")]
     pub token: String,
