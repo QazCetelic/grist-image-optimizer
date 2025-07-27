@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::Path;
 use tempfile::NamedTempFile;
 use tokio::process::Command;
 
@@ -28,7 +29,7 @@ pub async fn webp_install_check() -> bool {
         .is_ok()
 }
 
-pub async fn webp_convert(conversion_method: ConversionMethod, quality: usize, input_file_path: &NamedTempFile, output_file_path: &mut NamedTempFile) -> Result<(), &'static str> {
+pub async fn webp_convert(conversion_method: ConversionMethod, quality: usize, input_file_path: &NamedTempFile, output_file_path: &Path) -> Result<(), &'static str> {
     let compression_method_str = (conversion_method as usize).to_string();
     if quality > 100 { return Err("Quality must be between 0 and 100") }
     let quality_str = quality.to_string();
@@ -37,7 +38,7 @@ pub async fn webp_convert(conversion_method: ConversionMethod, quality: usize, i
             "-m", &compression_method_str, 
             "-q", &quality_str, "-mt", "-af", 
             "-progress", input_file_path.path().to_str().ok_or("Invalid input file")?, 
-            "-o", output_file_path.path().to_str().ok_or("Invalid output path")?,
+            "-o", output_file_path.to_str().ok_or("Invalid output path")?,
         ])
         .output()
         .await

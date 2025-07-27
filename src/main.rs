@@ -19,9 +19,10 @@ use serde_json::Value;
 use serde_json::Value::Array;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
+use std::env::temp_dir;
 use std::fs;
 use std::io::Write;
-use tempfile::NamedTempFile;
+use tempfile::{tempdir, NamedTempFile};
 use tokio::sync::Semaphore;
 
 #[tokio::main]
@@ -262,15 +263,16 @@ async fn process_attachment(configuration: &Configuration, compression_method: C
                 let mut original_file = NamedTempFile::new()?;
                 original_file.write(&attachment_bytes).context("Failed to write to temporary file")?;
 
-                let mut converted_file = NamedTempFile::new()?;
+                let converted_file_dir = tempdir()?;
+                let converted_file = converted_file_dir.path().join(&file_name).with_extension("WEBP");
                 let webp_quality = max(QUALITY_MAX - (old_size_kb / QUALITY_KB_RATIO) as isize, QUALITY_MIN) as usize;
-                webp_convert(compression_method, webp_quality, &original_file, &mut converted_file).await.map_err(|err| anyhow!(err))?;
+                webp_convert(compression_method, webp_quality, &original_file, &converted_file).await.map_err(|err| anyhow!(err))?;
                 drop(original_file);
 
-                let converted_file_metadata = fs::metadata(&converted_file.path()).context("Failed to get metadata of converted file")?;
+                let converted_file_metadata = fs::metadata(&converted_file).context("Failed to get metadata of converted file")?;
                 let converted_file_size_kb = converted_file_metadata.len() / 1024;
 
-                let attachment_paths = vec![converted_file.path().to_path_buf()];
+                let attachment_paths = vec![converted_file.to_path_buf()];
 
                 let ids = upload_attachments(configuration, doc_id, attachment_paths).await.context("Failed to upload attachments")?;
                 drop(converted_file);
