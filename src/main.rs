@@ -244,9 +244,9 @@ struct UpdatedAttachmentIds {
     pub new: u64
 }
 
-async fn process_attachment(configuration: &Configuration, compression_method: ConversionMethod, image_folder: &str, doc_id: &str, attachment: AttachmentMetadataListRecordsInner, download_semaphore: &Semaphore) -> Result<UpdatedAttachmentIds, &'static str> {
+async fn process_attachment(configuration: &Configuration, compression_method: ConversionMethod, image_folder: &str, doc_id: &str, attachment: AttachmentMetadataListRecordsInner, download_semaphore: &Semaphore) -> anyhow::Result<UpdatedAttachmentIds> {
     if let Some(complete_filename) = attachment.fields.file_name.clone() {
-        let (file_name, file_type) = complete_filename.rsplit_once(".").ok_or("Failed to parse filename")?;
+        let (file_name, file_type) = complete_filename.rsplit_once(".").context("Failed to parse filename")?;
 
         let downloaded_file_path = format!("{image_folder}/{file_name}.jpg");
         let downloaded_file_exists = fs::metadata(&downloaded_file_path).is_ok();
@@ -256,31 +256,33 @@ async fn process_attachment(configuration: &Configuration, compression_method: C
         let upper_file_type = file_type.to_ascii_uppercase();
         let is_unoptimized_image_type = upper_file_type == "JPG" || upper_file_type == "JPEG" || upper_file_type == "PNG";
         if is_unoptimized_image_type {
-            let old_size_kb = attachment.fields.file_size.ok_or("Failed to get original file size")? / 1024;
+            let old_size_kb = attachment.fields.file_size.context("Failed to get original file size")? / 1024;
             const MIN_SIZE_KB: usize = 100; // There is no point in converting the file if it's smaller than this
             const QUALITY_MAX: isize = 70;
             const QUALITY_MIN: isize = 3;
             const QUALITY_KB_RATIO: usize = 10;
             let should_convert = !converted_file_exists && old_size_kb >= MIN_SIZE_KB;
             if should_convert {
-                let download_permit = download_semaphore.acquire().await.map_err(|_| "Failed to acquire download semaphore")?;
+                let download_permit = download_semaphore.acquire().await.context("Failed to acquire download semaphore")?;
                 let attachment_bytes = download_attachment(configuration, doc_id, attachment.id).await;
                 drop(download_permit);
-                let attachment_bytes = attachment_bytes.map_err(|_| "Failed to download attachment")?;
-                fs::write(&downloaded_file_path, attachment_bytes).map_err(|_| "Failed to save attachment")?;
+                let attachment_bytes = attachment_bytes.context("Failed to download attachment")?;
+                fs::write(&downloaded_file_path, attachment_bytes).context("Failed to save attachment")?;
 
                 if !converted_file_exists {
                     let webp_quality = max(QUALITY_MAX - (old_size_kb / QUALITY_KB_RATIO) as isize, QUALITY_MIN) as usize;
-                    webp_convert(compression_method, webp_quality, &downloaded_file_path, &converted_file_path).await?;
-                    fs::remove_file(&downloaded_file_path).map_err(|_| "Failed to remove original file")?;
+                    if let Err(err) = webp_convert(compression_method, webp_quality, &downloaded_file_path, &converted_file_path).await {
+                        bail!(err);
+                    }
+                    fs::remove_file(&downloaded_file_path).context("Failed to remove original file")?;
 
-                    let converted_file_metadata = fs::metadata(&converted_file_path).map_err(|_| "Failed to get metadata of converted file")?;
+                    let converted_file_metadata = fs::metadata(&converted_file_path).context("Failed to get metadata of converted file")?;
                     let converted_file_size_kb = converted_file_metadata.len() / 1024;
 
                     let attachment_paths = vec![PathBuf::from(converted_file_path)];
 
-                    let ids = upload_attachments(configuration, doc_id, attachment_paths).await.map_err(|_| "Failed to upload attachments")?;
-                    let new_attachment_id = *(ids.first().ok_or("Failed to get attachment id")?);
+                    let ids = upload_attachments(configuration, doc_id, attachment_paths).await.context("Failed to upload attachments")?;
+                    let new_attachment_id = *(ids.first().context("Failed to get attachment id")?);
 
                     println!("Optimized '{file_name}' of type {upper_file_type} with size {old_size_kb}KiB and shrunk it to {converted_file_size_kb}KiB with quality {webp_quality}%.");
                     
@@ -294,7 +296,7 @@ async fn process_attachment(configuration: &Configuration, compression_method: C
         Ok(UpdatedAttachmentIds { old: attachment.id, new: attachment.id }) // Keep current attachment
     }
     else {
-        Err("Failed to get file name of attachment")
+        bail!("Failed to get file name of attachment")
     }
 }
 
