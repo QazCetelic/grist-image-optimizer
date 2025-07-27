@@ -186,7 +186,9 @@ async fn swap_attachments(configuration: &Configuration, doc_id: &str, attachmen
             }
         }
     }
-    println!("Successfully modified {modified_cnt} records!");
+    if modified_cnt > 0 {
+        println!("Successfully modified {modified_cnt} records!");
+    }
     Ok(())
 }
 
