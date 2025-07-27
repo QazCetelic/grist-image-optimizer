@@ -14,7 +14,7 @@ pub enum ConversionMethod {
 
 impl fmt::Display for ConversionMethod {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let str = format!("{:?}", self).to_lowercase();
+        let str = format!("{self:?}").to_lowercase();
         write!(f, "{str}")
     }
 }

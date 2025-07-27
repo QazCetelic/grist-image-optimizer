@@ -20,9 +20,7 @@ use serde_json::Value;
 use serde_json::Value::Array;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
-use tokio;
 use tokio::sync::Semaphore;
 
 #[tokio::main]
@@ -78,7 +76,10 @@ async fn optimize_attachments_doc(configuration: &Configuration, doc: Doc, conve
     if let Ok(attachments) = list_attachments(configuration, &doc.id, None, None, None, None, None).await {
         let all_attachments_length = attachments.records.len();
         let filtered_attachments = filter_attachments(attachments.records);
-        println!("Optimizing {}/{} attachments in {}", filtered_attachments.len(), all_attachments_length, doc.name);
+        let optimized_attachments_count = filtered_attachments.len();
+        if optimized_attachments_count > 0 {
+            println!("Optimizing {optimized_attachments_count}/{all_attachments_length} attachments in {}", doc.name);
+        }
         let mut tasks = Vec::new();
         for attachment in filtered_attachments {
             let task = process_attachment(configuration, conversion_method, image_folder, &doc.id, attachment, &download_semaphore);
@@ -120,7 +121,7 @@ fn filter_attachments(attachments: Vec<AttachmentMetadataListRecordsInner>) -> V
             let upper_file_type = file_type.to_uppercase();
             if is_unoptimized_image_type(&upper_file_type) {
                 if optimized_images.contains(file_name) {
-                    println!("Skipping unoptimized image {}, it seems to have already been converted...", file_name);
+                    println!("Skipping unoptimized image {file_name}, it seems to have already been converted...");
                 }
                 else {
                     to_process.push(attachment);
@@ -137,7 +138,7 @@ async fn swap_attachments(configuration: &Configuration, doc_id: &str, attachmen
     let mut modified_cnt = 0_usize;
     for table in tables.tables {
         let attachment_column_ids = scan_for_attachment_columns(configuration, doc_id, &table.id).await;
-        if attachment_column_ids.len() == 0 {
+        if attachment_column_ids.is_empty() {
             continue; // Skip table if there are no columns with the attachment type
         }
         let record_list = list_records(configuration, doc_id, &table.id, None, None, None, None, None, None).await.expect("Failed to list records");
@@ -147,7 +148,7 @@ async fn swap_attachments(configuration: &Configuration, doc_id: &str, attachmen
             let mut is_record_modified = false;
             'attachment_column_loop: for attachment_column in &attachment_column_ids {
                 let old_attachment_ids: Vec<u64> = get_attachment_ids(record.fields.get(attachment_column.as_str())).expect("Failed to get attachment ids");
-                if old_attachment_ids.len() == 0 {
+                if old_attachment_ids.is_empty() {
                     continue 'attachment_column_loop;
                 }
                 let mut new_attachment_ids: Vec<u64> = Vec::new();
@@ -177,7 +178,7 @@ async fn swap_attachments(configuration: &Configuration, doc_id: &str, attachmen
                 Ok(_) => {
                     modified_cnt += 1;
                 }
-                Err(err) => {
+                Err(_err) => {
                     modify_result.expect("Failed to modify records");
                 }
             }
@@ -186,7 +187,7 @@ async fn swap_attachments(configuration: &Configuration, doc_id: &str, attachmen
     println!("Successfully modified {modified_cnt} records!");
 }
 
-fn remove_all_non_attachment_fields(record: &mut RecordsListRecordsInner, attachment_column_ids: &Vec<String>) {
+fn remove_all_non_attachment_fields(record: &mut RecordsListRecordsInner, attachment_column_ids: &[String]) {
     record.fields.retain(|field, _| attachment_column_ids.contains(field));
 }
 

@@ -435,6 +435,7 @@ checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 [[package]]
 name = "grist-client"
 version = "0.0.1"
+source = "git+https://github.com/QazCetelic/grist-client-rs#a5e41d8a0debbb06bf2ff87c0a8aa80734251a32"
 dependencies = [
  "reqwest",
  "serde",
