@@ -19,7 +19,6 @@ use serde_json::Value;
 use serde_json::Value::Array;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
-use std::env::temp_dir;
 use std::fs;
 use std::io::Write;
 use tempfile::{tempdir, NamedTempFile};
