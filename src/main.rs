@@ -41,19 +41,15 @@ async fn main() -> anyhow::Result<()> {
 async fn optimize_attachments(configuration: &Configuration, conversion_method: ConversionMethod, concurrent_downloads: usize, specific_doc: &Option<String>) -> anyhow::Result<()> {
     if let Ok(orgs) = list_orgs(configuration).await {
         for org in orgs {
-            if let Some(org_domain) = org.domain {
-                if let Ok(workspaces) = list_workspaces(configuration, &org_domain).await {
-                    for workspace in workspaces {
-                        if let Ok(workspace_info) = describe_workspace(configuration, workspace.id as i32).await {
-                            'doc_loop: for doc in workspace_info.docs {
-                                if let Some(specific_doc) = specific_doc {
-                                    if doc.name != *specific_doc {
-                                        println!("Skipped doc '{}'...", doc.name);
-                                        continue 'doc_loop;
-                                    }
-                                }
-                                optimize_attachments_doc(configuration, doc, conversion_method, concurrent_downloads).await?;
+            if let Some(org_domain) = org.domain && let Ok(workspaces) = list_workspaces(configuration, &org_domain).await {
+                for workspace in workspaces {
+                    if let Ok(workspace_info) = describe_workspace(configuration, workspace.id as i32).await {
+                        'doc_loop: for doc in workspace_info.docs {
+                            if let Some(specific_doc) = specific_doc && doc.name != *specific_doc {
+                                println!("Skipped doc '{}'...", doc.name);
+                                continue 'doc_loop;
                             }
+                            optimize_attachments_doc(configuration, doc, conversion_method, concurrent_downloads).await?;
                         }
                     }
                 }
@@ -263,7 +259,7 @@ async fn process_attachment(configuration: &Configuration, compression_method: C
                 original_file.write(&attachment_bytes).context("Failed to write to temporary file")?;
 
                 let converted_file_dir = tempdir()?;
-                let converted_file = converted_file_dir.path().join(&file_name).with_extension("WEBP");
+                let converted_file = converted_file_dir.path().join(file_name).with_extension("WEBP");
                 let webp_quality = max(QUALITY_MAX - (old_size_kb / QUALITY_KB_RATIO) as isize, QUALITY_MIN) as usize;
                 webp_convert(compression_method, webp_quality, &original_file, &converted_file).await.map_err(|err| anyhow!(err))?;
                 drop(original_file);
