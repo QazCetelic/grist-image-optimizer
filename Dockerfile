@@ -1,4 +1,4 @@
-FROM rust:alpine AS builder
+FROM docker.io/rust:alpine AS builder
 
 RUN apk add --no-cache musl-dev gcc gcc openssl-dev openssl-libs-static
 WORKDIR /usr/src/app
@@ -6,7 +6,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY . .
 RUN cargo build --release
 
-FROM alpine:3
+FROM docker.io/alpine:3
 
 RUN apk add --no-cache libwebp-tools openssl
 WORKDIR /usr/src/app
